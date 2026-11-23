@@ -340,7 +340,10 @@ function fileFlush() {
   catch (e) { log('⚠ comptes : écriture impossible :', e.message); }
 }
 const fileSave = () => { clearTimeout(fileKv.t); fileKv.t = setTimeout(fileFlush, 400); };
-['SIGTERM', 'SIGINT'].forEach((sig) => process.on(sig, () => { if (fileKv.t) { clearTimeout(fileKv.t); fileFlush(); } process.exit(0); }));
+['SIGTERM', 'SIGINT'].forEach((sig) => process.on(sig, () => {
+  try { lbFlushAll(); } catch (e) {}
+  setTimeout(() => { if (fileKv.t) { clearTimeout(fileKv.t); fileFlush(); } process.exit(0); }, KV_ON ? 1500 : 0);   // laisse partir les dernières écritures du classement
+}));
 const kv = {
   async get(k) {
     if (KV_ON) return upstash(['GET', k]);
@@ -488,6 +491,80 @@ async function accountRoute(req, res, url) {
   sendJson(res, 404, {e: 'route'});
 }
 
+// ---------------------------------------------------------------- classement en ligne de l'aventure
+// Deux classements : la semaine (remis à zéro le lundi à minuit, heure de Paris) et le général (meilleur niveau de tous les temps).
+// Seuls les comptes y figurent (pseudos uniques). Le top 3 de la semaine passée réclame sa récompense une seule fois.
+const LB_KEEP = 100, LB_SHOW = 20, LB_REWARDS = [2000, 1000, 500], LB_MAXLVL = 500;
+function parisParts(ms) {
+  const f = new Intl.DateTimeFormat('en-GB', {timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'});
+  const o = {}; for (const x of f.formatToParts(new Date(ms))) o[x.type] = +x.value || 0;
+  return o;   // year, month, day, hour, minute, second
+}
+const parisOffset = (ms) => { const o = parisParts(ms); return Date.UTC(o.year, o.month - 1, o.day, o.hour, o.minute, o.second) - Math.floor(ms / 1000) * 1000; };
+function weekInfo(ms) {
+  const o = parisParts(ms), d = new Date(Date.UTC(o.year, o.month - 1, o.day)), dow = (d.getUTCDay() + 6) % 7;   // lundi = 0
+  const t = new Date(d); t.setUTCDate(t.getUTCDate() - dow + 3);   // jeudi de la semaine (semaine ISO)
+  const y = t.getUTCFullYear(), w = 1 + Math.round((t - Date.UTC(y, 0, 4)) / 604800000 - 3 / 7 + ((new Date(Date.UTC(y, 0, 4)).getUTCDay() + 6) % 7) / 7);
+  const endLocal = Date.UTC(o.year, o.month - 1, o.day - dow + 7);   // lundi suivant 00:00, heure de Paris
+  let end = endLocal - parisOffset(endLocal); end = endLocal - parisOffset(end);
+  return {id: y + '-W' + String(w).padStart(2, '0'), end: end};
+}
+const lbBoards = new Map(), lbDirty = new Map();
+async function lbGet(key) {
+  if (lbBoards.has(key)) return lbBoards.get(key);
+  let b = []; try { const raw = await kv.get(key); if (raw) b = JSON.parse(raw).e || []; } catch (e) {}
+  lbBoards.set(key, b); capMap(lbBoards, 20);
+  return b;
+}
+function lbSave(key, ttl) {   // écriture groupée : au plus une toutes les 10 s par classement
+  if (lbDirty.has(key)) return;
+  lbDirty.set(key, setTimeout(() => { lbDirty.delete(key); const b = lbBoards.get(key); if (b) kv.set(key, JSON.stringify({e: b}), ttl ? {ex: ttl} : null).catch((e) => log('⚠ classement :', e.message)); }, 10000));
+}
+function lbFlushAll() { for (const [key, t] of lbDirty) { clearTimeout(t); const b = lbBoards.get(key); if (b) kv.set(key, JSON.stringify({e: b}), key.startsWith('lb:w:') ? {ex: 40 * 86400} : null).catch(() => {}); } lbDirty.clear(); }
+function lbPut(board, a, level) {   // garde le meilleur niveau ; à égalité, le premier arrivé passe devant
+  let e = board.find((x) => x.k === a.k);
+  if (e && e.l >= level) { e.p = a.p; return false; }
+  if (!e) { e = {k: a.k, p: a.p, l: 0, t: 0}; board.push(e); }
+  e.l = level; e.t = Date.now(); e.p = a.p;
+  board.sort((x, y) => y.l - x.l || x.t - y.t);
+  if (board.length > LB_KEEP) board.length = LB_KEEP;
+  return true;
+}
+const lbTop = (b, n) => b.slice(0, n).map((e) => ({p: e.p, l: e.l}));
+const lbMe = (b, k) => { const i = b.findIndex((e) => e.k === k); return i < 0 ? null : {rank: i + 1, l: b[i].l}; };
+async function lbRoute(req, res, url) {
+  if (req.method === 'OPTIONS') { res.writeHead(204, {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type'}); res.end(); return; }
+  const b = req.method === 'POST' ? await readBody(req, 4096) : {};
+  if (!b || b._big) { sendJson(res, 400, {e: 'body'}); return; }
+  const now = Date.now(), W = weekInfo(now), wkey = 'lb:w:' + W.id;
+  const a = b.token ? await tokAcc(b.token) : null;
+  if (url === '/lb/view') {
+    const all = await lbGet('lb:all'), week = await lbGet(wkey);
+    const prev = weekInfo(W.end - 8 * 86400e3), pw = await lbGet('lb:w:' + prev.id);
+    sendJson(res, 200, {ok: true, now: now, week: {id: W.id, end: W.end, top: lbTop(week, LB_SHOW), n: week.length}, all: {top: lbTop(all, LB_SHOW), n: all.length},
+      last: lbTop(pw, 3), rewards: LB_REWARDS, me: a ? {pseudo: a.p, week: lbMe(week, a.k), all: lbMe(all, a.k)} : null});
+    return;
+  }
+  if (!a) { sendJson(res, 200, {e: 'auth'}); return; }
+  if (url === '/lb/submit') {
+    const level = Math.floor(Number(b.level));
+    if (!(level >= 1 && level <= LB_MAXLVL)) { sendJson(res, 400, {e: 'level'}); return; }
+    const all = await lbGet('lb:all'); if (lbPut(all, a, level)) lbSave('lb:all');
+    if (!b.old) { const week = await lbGet(wkey); if (lbPut(week, a, level)) lbSave(wkey, 40 * 86400); }   // « old » : record d'avant le compte, ne compte pas pour la semaine
+    sendJson(res, 200, {ok: true, week: lbMe(await lbGet(wkey), a.k), all: lbMe(all, a.k)});
+    return;
+  }
+  if (url === '/lb/reward') {
+    const prev = weekInfo(W.end - 8 * 86400e3), pw = await lbGet('lb:w:' + prev.id), i = pw.findIndex((e) => e.k === a.k);
+    if (i < 0 || i > 2 || !(pw[i].l > 0)) { sendJson(res, 200, {ok: true, none: true}); return; }
+    if (!(await kv.set('lbr:' + prev.id + ':' + a.k, '1', {nx: true, ex: 40 * 86400}))) { sendJson(res, 200, {ok: true, none: true, claimed: true}); return; }
+    log('récompense de la semaine', prev.id, ':', a.p, (i + 1) + 'e');
+    sendJson(res, 200, {ok: true, rank: i + 1, amount: LB_REWARDS[i], week: prev.id});
+    return;
+  }
+  sendJson(res, 404, {e: 'route'});
+}
+
 // ---------------------------------------------------------------- joueurs en ligne (compteur affiché dans le jeu)
 // Chaque page du jeu ouverte signale sa présence toutes les ~25 s ; on compte celles vues dans la dernière minute.
 const presence = new Map();
@@ -506,6 +583,7 @@ const server = http.createServer((req, res) => {
   if (url.startsWith('/shop/')) { shopRoute(req, res, url).catch(() => { try { sendJson(res, 500, {e: 'server'}); } catch (e) {} }); return; }
   if (url.startsWith('/account/')) { accountRoute(req, res, url).catch((e) => { log('⚠ comptes :', e.message); try { sendJson(res, 503, {e: 'store'}); } catch (x) {} }); return; }
   if (url === '/presence') { presenceRoute(req, res, url); return; }
+  if (url.startsWith('/lb/')) { lbRoute(req, res, url).catch((e) => { log('⚠ classement :', e.message); try { sendJson(res, 503, {e: 'store'}); } catch (x) {} }); return; }
   if (url === '/legal/mentions') { pageMentions(res); return; }
   if (url === '/legal/cgv') { pageCgv(res); return; }
   if (url === '/legal/confidentialite') { pageConfidentialite(res); return; }
