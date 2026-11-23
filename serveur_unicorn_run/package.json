@@ -1,0 +1,9 @@
+{
+  "name": "unicorn-run-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serveur Unicorn Run : duels TCG en ligne et boutique d'arcs-en-ciel (Stripe). Aucune dépendance.",
+  "main": "tcg_server.js",
+  "scripts": { "start": "node tcg_server.js" },
+  "engines": { "node": ">=18" }
+}
