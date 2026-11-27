@@ -1,0 +1,25 @@
+{
+  "_aide": "Remplace chaque « À COMPLÉTER » par tes vraies informations, puis redéploie le serveur. Tant qu'il reste un « À COMPLÉTER », les paiements réels (clé sk_live) restent bloqués. « nom_commercial » est le nom du studio affiché aux joueurs.",
+  "nom": "À COMPLÉTER : ton prénom et ton nom (obligatoire même avec le nom de studio Neko)",
+  "nom_commercial": "Neko",
+  "statut": "À COMPLÉTER : par ex. « Entrepreneur individuel (micro-entrepreneur) »",
+  "siret": "À COMPLÉTER : ton numéro SIRET (14 chiffres)",
+  "immatriculation": "",
+  "adresse": "À COMPLÉTER : adresse postale complète",
+  "email": "À COMPLÉTER : adresse e-mail de contact",
+  "telephone": "À COMPLÉTER : numéro de téléphone",
+  "directeur_publication": "À COMPLÉTER : en général toi-même (prénom et nom)",
+  "tva": "TVA non applicable, art. 293 B du CGI",
+  "mediateur": {
+    "nom": "À COMPLÉTER : nom du médiateur de la consommation choisi",
+    "adresse": "À COMPLÉTER : adresse postale du médiateur",
+    "site": "À COMPLÉTER : site internet du médiateur"
+  },
+  "hebergeur": {
+    "nom": "Render Services, Inc.",
+    "adresse": "525 Brannan Street, Suite 300, San Francisco, CA 94107, États-Unis",
+    "contact": "https://render.com"
+  },
+  "nom_du_jeu": "Unicorn Run",
+  "date_mise_a_jour": "23 novembre 2026"
+}
